@@ -18,8 +18,10 @@ import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.persistence.PersistentDataType;
 
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.logging.Level;
 
 import static net.kyori.adventure.text.Component.text;
 import static net.kyori.adventure.text.format.NamedTextColor.GOLD;
@@ -67,14 +69,24 @@ public class InvseeSession implements Session {
         return this.inventory;
     }
 
-    private PlayerInventory getPlayerInventory(OfflinePlayer offlinePlayer) {
+    private CompletableFuture<PlayerInventory> getPlayerInventory(OfflinePlayer offlinePlayer) {
         if (offlinePlayer instanceof Player player) {
-            return player.getInventory();
+            CompletableFuture<PlayerInventory> future = new CompletableFuture<>();
+            player.getScheduler().run(PLUGIN,
+                    task -> future.complete(player.getInventory()),
+                    () -> future.complete(null));
+            return future;
         }
 
-        Optional<Player> player = getPlayerOffline(offlinePlayer);
-
-        return player.map(Player::getInventory).orElse(null);
+        return getPlayerOffline(offlinePlayer)
+                .thenApply(opt -> {
+                    System.out.println("getPlayerInventory: resolved player " + opt);
+                    return opt.map(Player::getInventory).orElse(null);
+                })
+                .exceptionally(throwable -> {
+                    PLUGIN.getLogger().log(Level.SEVERE, "Failed to resolve player inventory", throwable);
+                    return null;
+                });
     }
 
     @Override
@@ -86,19 +98,42 @@ public class InvseeSession implements Session {
     public void updateSubscriberInventory() {
         update(() -> {
             OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(this.uuid);
-            PlayerInventory playerInv = getPlayerInventory(offlinePlayer);
 
-            if (playerInv == null) {
-                return;
-            }
+            getPlayerInventory(offlinePlayer).thenAccept(playerInv -> {
+                System.out.println("updateSubscriberInventory: got player inventory " + playerInv);
+                if (playerInv == null) return;
 
-            for (int i = 0; i < 41; i++) {
-                this.inventory.setItem(i, playerInv.getItem(i));
-            }
-            if (offlinePlayer instanceof Player player) {
-                this.inventory.setItem(41, player.getItemOnCursor());
-            }
-            replaceEmptyPlaceholderSpots();
+                Runnable readAndApply = () -> {
+                    ItemStack[] snapshot = new ItemStack[41];
+                    for (int i = 0; i < 41; i++) {
+                        ItemStack item = playerInv.getItem(i);
+                        snapshot[i] = item == null ? null : item.clone();
+                    }
+                    ItemStack cursor = (playerInv.getHolder() instanceof Player p)
+                            ? cloneOrNull(p.getItemOnCursor()) : null;
+
+                    Bukkit.getGlobalRegionScheduler().run(PLUGIN, task -> {
+                        for (int i = 0; i < 41; i++) {
+                            this.inventory.setItem(i, snapshot[i]);
+                        }
+                        if (cursor != null) {
+                            this.inventory.setItem(41, cursor);
+                        }
+                        replaceEmptyPlaceholderSpots();
+                    });
+                };
+
+                // read player state on the player's own thread
+                if (playerInv.getHolder() instanceof Player player) {
+                    player.getScheduler().run(PLUGIN, t -> readAndApply.run(), null);
+                } else {
+                    readAndApply.run(); // offline: depends on getPlayerOffline's contract
+                }
+                System.out.println("updateSubscriberInventory: scheduled inventory update for " + playerInv);
+            }).exceptionally(throwable -> {
+                PLUGIN.getLogger().log(Level.SEVERE, "Failed to update subscriber inventory", throwable);
+                return null;
+            });
         });
     }
 
@@ -122,21 +157,51 @@ public class InvseeSession implements Session {
     @Override
     public void updateObservedInventory() {
         update(() -> {
-            OfflinePlayer offlinePlayer = InvseePlugin.getInstance().getServer().getOfflinePlayer(uuid);
-            PlayerInventory playerInventory = getPlayerInventory(offlinePlayer);
-            if (playerInventory == null) {
-                return;
-            }
-            for (int i = 0; i < playerInventory.getSize(); i++) {
-                if (Placeholders.isPlaceholder(this.inventory.getItem(i))) continue;
-                playerInventory.setItem(i, this.inventory.getItem(i));
-            }
+            OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(uuid);
 
-            if (!Placeholders.isPlaceholder(this.inventory.getItem(41)) && offlinePlayer instanceof Player player) {
-                player.setItemOnCursor(this.inventory.getItem(41));
-            }
+            getPlayerInventory(offlinePlayer).thenAccept(playerInventory -> {
+                System.out.println("updateObservedInventory: got player inventory " + playerInventory);
+                if (playerInventory == null) return;
 
-            replaceEmptyPlaceholderSpots();
+                Bukkit.getGlobalRegionScheduler().run(PLUGIN, guiTask -> {
+                    int size = playerInventory.getSize();
+                    ItemStack[] snapshot = new ItemStack[size];
+                    boolean[] skip = new boolean[size];
+                    for (int i = 0; i < size; i++) {
+                        ItemStack guiItem = this.inventory.getItem(i);
+                        if (Placeholders.isPlaceholder(guiItem)) {
+                            skip[i] = true;
+                        } else {
+                            snapshot[i] = cloneOrNull(guiItem);
+                        }
+                    }
+                    ItemStack cursorItem = this.inventory.getItem(41);
+                    boolean writeCursor = !Placeholders.isPlaceholder(cursorItem);
+                    ItemStack cursorSnapshot = cloneOrNull(cursorItem);
+
+                    replaceEmptyPlaceholderSpots();
+
+                    Runnable writeBack = () -> {
+                        for (int i = 0; i < size; i++) {
+                            if (skip[i]) continue;
+                            playerInventory.setItem(i, snapshot[i]);
+                        }
+                        if (writeCursor && playerInventory.getHolder() instanceof Player player) {
+                            player.setItemOnCursor(cursorSnapshot);
+                        }
+                    };
+
+                    if (playerInventory.getHolder() instanceof Player player) {
+                        player.getScheduler().run(PLUGIN, t -> writeBack.run(), null);
+                    } else {
+                        writeBack.run(); // offline write-back: see caveat
+                    }
+                    System.out.println("updateObservedInventory: scheduled inventory write-back for " + playerInventory);
+                });
+            }).exceptionally(throwable -> {
+                PLUGIN.getLogger().log(Level.SEVERE, "Failed to write observed inventory", throwable);
+                return null;
+            });
         });
     }
 
@@ -161,6 +226,10 @@ public class InvseeSession implements Session {
         if (object == null || getClass() != object.getClass()) return false;
         InvseeSession session = (InvseeSession) object;
         return Objects.equals(uuid, session.uuid);
+    }
+
+    private static ItemStack cloneOrNull(ItemStack item) {
+        return item == null ? null : item.clone();
     }
 
     @Override

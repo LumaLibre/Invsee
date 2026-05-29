@@ -10,10 +10,13 @@ import org.bukkit.entity.HumanEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.ItemStack;
 
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.logging.Level;
 
 import static net.kyori.adventure.text.Component.text;
 
@@ -44,13 +47,21 @@ public class EnderseeSession implements Session {
         addSubscriber(subscriber);
     }
 
-    private Inventory getEnderChest(OfflinePlayer offline) {
+    private CompletableFuture<Inventory> getEnderChest(OfflinePlayer offline) {
         if (offline instanceof Player player) {
-            return player.getEnderChest();
+            CompletableFuture<Inventory> future = new CompletableFuture<>();
+            player.getScheduler().run(PLUGIN,
+                    task -> future.complete(player.getEnderChest()),
+                    () -> future.complete(null));   // retired: player gone
+            return future;
         }
 
-        Optional<Player> player = getPlayerOffline(offline);
-        return player.map(HumanEntity::getEnderChest).orElse(null);
+        return getPlayerOffline(offline)
+                .thenApply(opt -> opt.map(HumanEntity::getEnderChest).orElse(null))
+                .exceptionally(throwable -> {
+                    PLUGIN.getLogger().log(Level.SEVERE, "Failed to resolve ender chest", throwable);
+                    throw new RuntimeException(throwable);
+                });
     }
 
     @Override
@@ -62,13 +73,35 @@ public class EnderseeSession implements Session {
     public void updateObservedInventory() {
         update(() -> {
             OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(this.uuid);
-            Inventory enderChest = getEnderChest(offlinePlayer);
-            if (enderChest == null) {
-                return;
-            }
-            for (int i = 0; i < InventoryType.ENDER_CHEST.getDefaultSize(); i++) {
-                enderChest.setItem(i, this.enderchest.getItem(i));
-            }
+            int size = InventoryType.ENDER_CHEST.getDefaultSize();
+
+            Bukkit.getGlobalRegionScheduler().run(PLUGIN, guiTask -> {
+                ItemStack[] snapshot = new ItemStack[size];
+                for (int i = 0; i < size; i++) {
+                    ItemStack item = this.enderchest.getItem(i);
+                    snapshot[i] = item == null ? null : item.clone();
+                }
+
+                getEnderChest(offlinePlayer).thenAccept(enderChest -> {
+                    if (enderChest == null) return;
+
+                    if (enderChest.getHolder() instanceof Player target) {
+                        target.getScheduler().run(PLUGIN, task -> {
+                            for (int i = 0; i < size; i++) {
+                                enderChest.setItem(i, snapshot[i]);
+                            }
+                        }, null);
+                    } else {
+                        // offline write-back: depends entirely on what getPlayerOffline does
+                        for (int i = 0; i < size; i++) {
+                            enderChest.setItem(i, snapshot[i]);
+                        }
+                    }
+                }).exceptionally(throwable -> {
+                    PLUGIN.getLogger().log(Level.SEVERE, "Failed to write observed enderchest", throwable);
+                    return null;
+                });
+            });
         });
     }
 
@@ -76,15 +109,26 @@ public class EnderseeSession implements Session {
     public void updateSubscriberInventory() {
         update(() -> {
             OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(uuid);
-            Inventory enderChest = getEnderChest(offlinePlayer);
+            int size = InventoryType.ENDER_CHEST.getDefaultSize();
 
-            if (enderChest == null) {
-                return;
-            }
+            getEnderChest(offlinePlayer).thenAccept(enderChest -> {
+                if (enderChest == null) return;
 
-            for (int i = 0; i < InventoryType.ENDER_CHEST.getDefaultSize(); i++) {
-                this.enderchest.setItem(i, enderChest.getItem(i));
-            }
+                ItemStack[] snapshot = new ItemStack[size];
+                for (int i = 0; i < size; i++) {
+                    ItemStack item = enderChest.getItem(i);
+                    snapshot[i] = item == null ? null : item.clone();
+                }
+
+                Bukkit.getGlobalRegionScheduler().run(PLUGIN, task -> {
+                    for (int i = 0; i < size; i++) {
+                        this.enderchest.setItem(i, snapshot[i]);
+                    }
+                });
+            }).exceptionally(throwable -> {
+                PLUGIN.getLogger().log(Level.SEVERE, "Failed to update subscriber enderchest", throwable);
+                return null;
+            });
         });
     }
 

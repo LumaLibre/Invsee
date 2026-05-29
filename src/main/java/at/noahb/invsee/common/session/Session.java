@@ -13,15 +13,19 @@ import org.bukkit.OfflinePlayer;
 import org.bukkit.craftbukkit.CraftServer;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
+import org.bukkit.plugin.Plugin;
 
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static net.kyori.adventure.text.Component.text;
 
 public interface Session {
+
+    Plugin PLUGIN = InvseePlugin.getInstance();
 
     default void addSubscriber(UUID subscriber) {
         if (subscriber == null) return;
@@ -31,13 +35,18 @@ public interface Session {
 
         OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(getUniqueIdOfObservedPlayer());
 
-        Optional<Player> other = getPlayerOffline(offlinePlayer);
-        if (other.isEmpty()) {
-            return;
-        }
+        getPlayerOffline(offlinePlayer).thenAccept(other -> {
+            if (other.isEmpty()) return;
 
-        getSubscribers().add(subscriber);
-        player.getScheduler().run(InvseePlugin.getInstance(), scheduledTask -> player.openInventory(getInventory()), null);
+            getSubscribers().add(subscriber);
+            player.getScheduler().run(InvseePlugin.getInstance(),
+                    scheduledTask -> player.openInventory(getInventory()),
+                    null);
+        }).exceptionally(throwable -> {
+            PLUGIN.getLogger()
+                    .log(java.util.logging.Level.SEVERE, "Failed to add subscriber " + subscriber, throwable);
+            return null;
+        });
     }
 
 
@@ -64,26 +73,36 @@ public interface Session {
         return !InvseePlugin.getInstance().getServer().getOfflinePlayer(getUniqueIdOfObservedPlayer()).isOnline();
     }
 
-    default Optional<Player> getPlayerOffline(OfflinePlayer offlinePlayer) {
+    default CompletableFuture<Optional<Player>> getPlayerOffline(OfflinePlayer offlinePlayer) {
+        CompletableFuture<Optional<Player>> future = new CompletableFuture<>();
         Player cached = getCachedPlayer();
         if (cached != null) {
-            return Optional.of(cached);
+            future.complete(Optional.of(cached));
+            return future;
         }
 
         GameProfile profile = new GameProfile(offlinePlayer.getUniqueId(),
                 offlinePlayer.getName() != null ? offlinePlayer.getName() : offlinePlayer.getUniqueId().toString());
-        MinecraftServer server = ((CraftServer) Bukkit.getServer()).getServer();
+        CraftServer craftServer = (CraftServer) Bukkit.getServer();
+        MinecraftServer server = craftServer.getServer();
         ServerLevel level = server.getLevel(Level.OVERWORLD);
         if (level == null) {
-            InvseePlugin.getInstance().getComponentLogger().error(text("Unable to find overworld level", NamedTextColor.RED));
-            return Optional.empty();
+            PLUGIN.getComponentLogger().error(text("Unable to find overworld level", NamedTextColor.RED));
+            future.complete(Optional.empty());
+            return future;
         }
 
         ServerPlayer serverPlayer = new ServerPlayer(server, level, profile, ClientInformation.createDefault());
         Player target = serverPlayer.getBukkitEntity();
-        target.loadData();
-        cache(target);
-        return Optional.of(target);
+        Bukkit.getRegionScheduler().run(PLUGIN, target.getLocation(), task -> {
+            // mock loadData()
+            craftServer.getHandle().playerIo.load(serverPlayer.nameAndId());
+            target.loadData();
+            cache(target);
+            System.out.println("Cached player " + target);
+            future.complete(Optional.of(target));
+        });
+        return future;
     }
 
     UUID getUniqueIdOfObservedPlayer();
