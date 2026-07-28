@@ -9,8 +9,11 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.Level;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
 import org.bukkit.OfflinePlayer;
+import org.bukkit.World;
 import org.bukkit.craftbukkit.CraftServer;
+import org.bukkit.craftbukkit.CraftWorld;
 import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
 
@@ -70,16 +73,20 @@ public interface Session extends SessionInventory {
             return Optional.of(cached);
         }
 
-        GameProfile profile = new GameProfile(offlinePlayer.getUniqueId(),
-                offlinePlayer.getName() != null ? offlinePlayer.getName() : offlinePlayer.getUniqueId().toString());
         MinecraftServer server = ((CraftServer) Bukkit.getServer()).getServer();
-        ServerLevel level = server.getLevel(Level.OVERWORLD);
-        if (level == null) {
-            InvseePlugin.getInstance().getComponentLogger().error(text("Unable to find overworld level", NamedTextColor.RED));
-            return Optional.empty();
+        Location location = offlinePlayer.getLocation();
+        ServerLevel world;
+
+        if (location == null) {
+            world = server.overworld();
+        } else {
+            world = ((CraftWorld) location.getWorld()).getHandle();
         }
 
-        ServerPlayer serverPlayer = new ServerPlayer(server, level, profile, ClientInformation.createDefault());
+        GameProfile profile = new GameProfile(offlinePlayer.getUniqueId(),
+                offlinePlayer.getName() != null ? offlinePlayer.getName() : offlinePlayer.getUniqueId().toString());
+
+        ServerPlayer serverPlayer = new ServerPlayer(server, world, profile, ClientInformation.createDefault());
         Player target = serverPlayer.getBukkitEntity();
         target.loadData();
         cache(target);
