@@ -15,7 +15,7 @@ public class EnderseeCommand extends AbstractPluginCommand {
                 instance,
                 "endersee",
                 "Endersee command",
-                "/endersee <player>",
+                "/endersee <player|uuid>",
                 PERMISSION,
                 List.of("esee", "es", "ecsee")
         );

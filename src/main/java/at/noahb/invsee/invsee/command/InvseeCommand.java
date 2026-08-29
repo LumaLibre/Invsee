@@ -15,7 +15,7 @@ public class InvseeCommand extends AbstractPluginCommand {
                 instance,
                 "invsee",
                 "Invsee command",
-                "/invsee <player>",
+                "/invsee <player|uuid>",
                 PERMISSION,
                 List.of("isee", "is", "inv")
         );
