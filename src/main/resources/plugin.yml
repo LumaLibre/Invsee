@@ -1,7 +1,7 @@
 name: Invsee
 version: '${version}'
 main: at.noahb.invsee.InvseePlugin
-api-version: '1.20.6'
+api-version: '26.2'
 authors:
   - MCmitNoah
 folia-supported: true

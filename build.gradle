@@ -22,12 +22,16 @@ repositories {
         name = "opencollab"
         url = "https://repo.opencollab.dev/main/"
     }
+    maven {
+        name = "canvasmc"
+        url = "https://maven.canvasmc.io/public"
+    }
 }
 
 dependencies {
     compileOnly "net.luckperms:api:5.4"
     compileOnly "org.geysermc.floodgate:api:2.2.5-SNAPSHOT"
-    paperweight.foliaDevBundle("1.20.6-R0.1-SNAPSHOT")
+    paperweight.devBundle("io.canvasmc.canvas", "26.2.build.937-stable")
 }
 
 
@@ -47,7 +51,7 @@ processResources {
 runPaper.folia.registerTask()
 tasks {
     runServer {
-        minecraftVersion("26.1.2")
+        minecraftVersion("26.2")
         jvmArgs("-Xms2G", "-Xmx2G", "-Dcom.mojang.eula.agree=true")
     }
 

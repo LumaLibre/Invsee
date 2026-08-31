@@ -1,6 +1,8 @@
 package at.noahb.invsee.common.session;
 
 import at.noahb.invsee.InvseePlugin;
+import org.bukkit.Bukkit;
+import org.bukkit.Location;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.entity.HumanEntity;
 import org.bukkit.entity.Player;
@@ -8,13 +10,13 @@ import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.inventory.Inventory;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.HashSet;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 public abstract class SessionManager {
-    private final Set<Session> sessions = new HashSet<>();
+    private final Set<Session> sessions = ConcurrentHashMap.newKeySet();
 
     private final InvseePlugin instance;
 
@@ -23,13 +25,33 @@ public abstract class SessionManager {
     }
 
     public void addSubscriberToSession(OfflinePlayer player, UUID subscriber) {
-        this.sessions.stream().filter(session -> session.getSubscribers().contains(subscriber))
-                .forEach(session -> session.removeSubscriber(subscriber));
+        Runnable addSubscriber = () -> {
+            synchronized (this.sessions) {
+                this.sessions.stream().filter(session -> session.getSubscribers().contains(subscriber))
+                        .forEach(session -> session.removeSubscriber(subscriber));
 
-        this.sessions.stream()
-                .filter(filterSession -> player.getUniqueId().equals(filterSession.getUniqueIdOfObservedPlayer()))
-                .findFirst()
-                .ifPresentOrElse(session -> session.addSubscriber(subscriber), () -> createSession(player, subscriber));
+                this.sessions.stream()
+                        .filter(filterSession -> player.getUniqueId().equals(filterSession.getUniqueIdOfObservedPlayer()))
+                        .findFirst()
+                        .ifPresentOrElse(session -> session.addSubscriber(subscriber), () -> createSession(player, subscriber));
+            }
+        };
+
+        if (player instanceof Player onlinePlayer) {
+            if (Bukkit.isOwnedByCurrentRegion(onlinePlayer)) {
+                addSubscriber.run();
+            } else {
+                onlinePlayer.getScheduler().run(this.instance, scheduledTask -> addSubscriber.run(), null);
+            }
+            return;
+        }
+
+        Location location = Session.getSchedulingLocation(player);
+        if (Bukkit.isOwnedByCurrentRegion(location)) {
+            addSubscriber.run();
+        } else {
+            Bukkit.getRegionScheduler().execute(this.instance, location, addSubscriber);
+        }
     }
 
     public void removeSubscriberFromSession(@NotNull HumanEntity subscriber) {

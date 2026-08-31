@@ -1,17 +1,15 @@
 package at.noahb.invsee.common.session;
 
 import at.noahb.invsee.InvseePlugin;
+import at.noahb.invsee.common.player.OfflinePlayerDataAccess;
 import com.mojang.authlib.GameProfile;
-import net.kyori.adventure.text.format.NamedTextColor;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ClientInformation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.level.Level;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.OfflinePlayer;
-import org.bukkit.World;
 import org.bukkit.craftbukkit.CraftServer;
 import org.bukkit.craftbukkit.CraftWorld;
 import org.bukkit.entity.Player;
@@ -21,8 +19,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
-
-import static net.kyori.adventure.text.Component.text;
 
 public interface Session extends SessionInventory {
 
@@ -47,19 +43,38 @@ public interface Session extends SessionInventory {
     default void save() {
         Player cachedPlayer = getCachedPlayer();
         if (cachedPlayer != null) {
-            cachedPlayer.saveData();
+            OfflinePlayerDataAccess.save(cachedPlayer);
         }
     }
 
     default void update(Runnable runnable) {
-        try {
-            getLock().lock();
-            runnable.run();
-            if (isOffline()) {
-                save();
+        Runnable guardedUpdate = () -> {
+            try {
+                getLock().lock();
+                runnable.run();
+                if (isOffline()) {
+                    save();
+                }
+            } finally {
+                if (getLock().isHeldByCurrentThread()) getLock().unlock();
             }
-        } finally {
-            if (getLock().isHeldByCurrentThread()) getLock().unlock();
+        };
+
+        OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(getUniqueIdOfObservedPlayer());
+        if (offlinePlayer instanceof Player onlinePlayer) {
+            if (Bukkit.isOwnedByCurrentRegion(onlinePlayer)) {
+                guardedUpdate.run();
+            } else {
+                onlinePlayer.getScheduler().run(InvseePlugin.getInstance(), scheduledTask -> guardedUpdate.run(), null);
+            }
+            return;
+        }
+
+        Location location = getSchedulingLocation(offlinePlayer);
+        if (Bukkit.isOwnedByCurrentRegion(location)) {
+            guardedUpdate.run();
+        } else {
+            Bukkit.getRegionScheduler().execute(InvseePlugin.getInstance(), location, guardedUpdate);
         }
     }
 
@@ -68,29 +83,37 @@ public interface Session extends SessionInventory {
     }
 
     default Optional<Player> getPlayerOffline(OfflinePlayer offlinePlayer) {
+        if (offlinePlayer instanceof Player onlinePlayer) {
+            return Optional.of(onlinePlayer);
+        }
+
         Player cached = getCachedPlayer();
         if (cached != null) {
             return Optional.of(cached);
         }
 
         MinecraftServer server = ((CraftServer) Bukkit.getServer()).getServer();
-        Location location = offlinePlayer.getLocation();
-        ServerLevel world;
-
-        if (location == null) {
-            world = server.overworld();
-        } else {
-            world = ((CraftWorld) location.getWorld()).getHandle();
-        }
+        Location location = getSchedulingLocation(offlinePlayer);
+        ServerLevel world = ((CraftWorld) location.getWorld()).getHandle();
 
         GameProfile profile = new GameProfile(offlinePlayer.getUniqueId(),
                 offlinePlayer.getName() != null ? offlinePlayer.getName() : offlinePlayer.getUniqueId().toString());
 
         ServerPlayer serverPlayer = new ServerPlayer(server, world, profile, ClientInformation.createDefault());
+        serverPlayer.setPos(location.getX(), location.getY(), location.getZ());
+        OfflinePlayerDataAccess.load(server, serverPlayer);
         Player target = serverPlayer.getBukkitEntity();
-        target.loadData();
         cache(target);
         return Optional.of(target);
+    }
+
+    static Location getSchedulingLocation(OfflinePlayer offlinePlayer) {
+        Location location = offlinePlayer.getLocation();
+        if (location != null) {
+            return location;
+        }
+
+        return Bukkit.getWorlds().getFirst().getSpawnLocation();
     }
 
     UUID getUniqueIdOfObservedPlayer();
